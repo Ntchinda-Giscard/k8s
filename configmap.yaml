@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wazalink-config
+  namespace: default
+  labels:
+    app: wazalink
+data:
+  # Base database URL for SQL Alchemy state tracking
+  DATABASE_URL: "sqlite:////root/wazalink_data/wazalink.db"
+  DATABASE_NAME: "wazalink"
+
+  # Sage Syracuse Web Service Endpoint
+  X3_WEBSERVICE_URL: "http://192.168.2.41:8124/soap-generic/syracuse/collaboration/syracuse/CAdxWebServiceXmlCC"
+
+  # Sage HRM SQL Server Database Configuration
+  SAGE_HRM_DRIVER: "ODBC Driver 17 for SQL Server"
+  SAGE_HRM_SERVER: "X3POEOLEPROD\\SAGEX3PPLE"
+  SAGE_HRM_DATABASE: "x3ppleprod"
+
+  # Sage X3 SQL Server Database Configuration
+  SAGE_X3_DRIVER: "ODBC Driver 17 for SQL Server"
+  SAGE_X3_SERVER: "SX3OPA\\X3"
+  SAGE_X3_DATABASE: "sage"

@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wazalink-deployment
+  namespace: default
+  labels:
+    app: wazalink
+spec:
+  replicas: 1  # Standard single replica due to local SQLite file locking constraints
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate  # Terminates old pod before starting new one to avoid concurrent SQLite locks on the PVC
+  selector:
+    matchLabels:
+      app: wazalink
+  template:
+    metadata:
+      labels:
+        app: wazalink
+    spec:
+      containers:
+        - name: wazalink
+          # Replace with your actual Docker registry image tag (e.g. docker.io/myusername/wazalink:1.0.0)
+          image: wazalink:latest
+          imagePullPolicy: IfNotPresent
+          
+          # Container port exposed by FastAPI Uvicorn server
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Inject configurations and secrets as environment variables
+          envFrom:
+            - configMapRef:
+                name: wazalink-config
+            - secretRef:
+                name: wazalink-secret
+
+          # Mount the persistent SQLite storage directory
+          # The app evaluates Path.home() / "wazalink_data", which resolves to /root/wazalink_data inside the container
+          volumeMounts:
+            - name: wazalink-sqlite-volume
+              mountPath: /root/wazalink_data
+
+          # Health Probes pointing to FastAPI health endpoint ("/")
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+
+          # Allocate resource guarantees and limits for container execution
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+      # Volumes mapped from Persistent Volume Claims
+      volumes:
+        - name: wazalink-sqlite-volume
+          persistentVolumeClaim:
+            claimName: wazalink-sqlite-pvc

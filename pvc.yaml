@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wazalink-sqlite-pvc
+  namespace: default
+  labels:
+    app: wazalink
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Leave storageClassName empty or comment it out to use the cluster's default storage class.
+  # If you have a specific storage class (e.g., standard, gp2, manual, longhorn), specify it here:
+  # storageClassName: default

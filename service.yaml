@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazalink-service
+  namespace: default
+  labels:
+    app: wazalink
+spec:
+  selector:
+    app: wazalink
+  # Expose as a ClusterIP by default (standard internal load balancer)
+  # Change to LoadBalancer or NodePort if direct external access is required
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80          # Port exposed by the Service in the cluster
+      targetPort: 8080  # Port that the pod's container listens on
+      protocol: TCP
