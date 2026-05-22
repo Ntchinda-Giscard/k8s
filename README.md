@@ -11,6 +11,7 @@ This directory contains the production-grade Kubernetes manifest files and deplo
 3. **`pvc.yaml`**: Requests a persistent volume (`1Gi`) for SQLite state persistence. This maps directly to the container home directory `/root/wazalink_data` inside the pod.
 4. **`deployment.yaml`**: Specifies a 1-replica application template running the custom FastAPI Docker image. Configured with a `Recreate` strategy to ensure zero file locking contentions on the database.
 5. **`service.yaml`**: Exposes the application on a cluster-internal stable IP address on port `80` (routing internally to target port `8080`).
+6. **`argocd-app.yaml`**: Declarative Argo CD Application file to orchestrate GitOps-based Continuous Delivery.
 
 ---
 
@@ -75,3 +76,27 @@ Now, visit `http://localhost:8080` in your web browser. You should receive:
 > If you plan to scale the Wazalink pod to `2` or more replicas for high availability:
 > 1. You should migrate the internal SQLite database state (`session.py`) to a centralized client-server engine like **PostgreSQL** or **MS SQL Server**.
 > 2. Once done, you can delete the `pvc.yaml` manifest, remove the `volumeMounts` configuration from `deployment.yaml`, and safely adjust `replicas` to any desired count.
+
+---
+
+## 🔄 Step 4: GitOps Continuous Delivery with Argo CD
+
+Argo CD allows you to continuously deploy your application directly from your Git repository. 
+
+To set up GitOps for Wazalink:
+
+1. **Commit and Push manifests to Git**:
+   Ensure that the `k8s/` folder containing the manifests is committed and pushed to your active repository (e.g., `https://github.com/Ntchinda-Giscard/wazalink.git`).
+
+2. **Configure `argocd-app.yaml`**:
+   Open `argocd-app.yaml` and verify that `repoURL` matches your Git repository, `targetRevision` points to your active branch, and `path` matches the folder location inside your repository.
+
+3. **Deploy the Application Resource to Argo CD**:
+   Apply the application manifest directly to the namespace where Argo CD is running (usually `argocd`):
+   ```bash
+   kubectl apply -f k8s/argocd-app.yaml
+   ```
+
+4. **Verify Synced Status**:
+   Once applied, Argo CD will automatically pull your repository, detect all Kubernetes manifests inside the `k8s/` folder, deploy them into the target namespace, and maintain automated synchronization and self-healing.
+

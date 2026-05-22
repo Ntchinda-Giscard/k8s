@@ -6,10 +6,10 @@ metadata:
   labels:
     app: wazalink
 spec:
-  replicas: 1  # Standard single replica due to local SQLite file locking constraints
+  replicas: 2 # Standard single replica due to local SQLite file locking constraints
   revisionHistoryLimit: 3
   strategy:
-    type: Recreate  # Terminates old pod before starting new one to avoid concurrent SQLite locks on the PVC
+    type: Recreate # Terminates old pod before starting new one to avoid concurrent SQLite locks on the PVC
   selector:
     matchLabels:
       app: wazalink
@@ -21,9 +21,9 @@ spec:
       containers:
         - name: wazalink
           # Replace with your actual Docker registry image tag (e.g. docker.io/myusername/wazalink:1.0.0)
-          image: wazalink:latest
+          image: docker.io/myusername/wazalink:1.0.0
           imagePullPolicy: IfNotPresent
-          
+
           # Container port exposed by FastAPI Uvicorn server
           ports:
             - name: http
