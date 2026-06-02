@@ -6,7 +6,7 @@ metadata:
   labels:
     app: wazalink
 spec:
-  replicas: 2 # Standard single replica due to local SQLite file locking constraints
+  replicas: 1 # Standard single replica due to local SQLite file locking constraints
   revisionHistoryLimit: 3
   strategy:
     type: Recreate # Terminates old pod before starting new one to avoid concurrent SQLite locks on the PVC
