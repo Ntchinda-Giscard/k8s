@@ -16,10 +16,10 @@ spec:
   source:
     # Replace with your actual Git repository URL
     # e.g., https://github.com/Ntchinda-Giscard/wazalink.git
-    repoURL: "https://github.com/Ntchinda-Giscard/wazalink.git"
+    repoURL: https://github.com/Ntchinda-Giscard/k8s.git
 
     # Target branch or revision (e.g., HEAD, main, master, or a specific tag)
-    targetRevision: HEAD
+    targetRevision: k8s
 
     # Path inside the Git repository where the Kubernetes manifests are stored
     # - If you push the 'k8s' folder to the root of your repository, use: 'k8s'
