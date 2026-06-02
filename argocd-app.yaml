@@ -6,6 +6,7 @@ metadata:
   labels:
     app: wazalink
 spec:
+  project: default
   # The destination cluster and namespace where wazalink should be deployed
   destination:
     server: https://kubernetes.default.svc  # Deploy to the same cluster Argo CD is running on
