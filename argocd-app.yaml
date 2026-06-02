@@ -2,34 +2,34 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: wazalink-argocd-app
-  namespace: argocd  # Argo CD usually runs in the 'argocd' namespace
+  namespace: argocd # Argo CD usually runs in the 'argocd' namespace
   labels:
     app: wazalink
 spec:
   project: default
   # The destination cluster and namespace where wazalink should be deployed
   destination:
-    server: https://kubernetes.default.svc  # Deploy to the same cluster Argo CD is running on
-    namespace: default                      # Target namespace for the wazalink application
+    server: https://kubernetes.default.svc # Deploy to the same cluster Argo CD is running on
+    namespace: default # Target namespace for the wazalink application
 
   # The source Git repository containing your Kubernetes manifests
   source:
     # Replace with your actual Git repository URL
     # e.g., https://github.com/Ntchinda-Giscard/wazalink.git
-    repoURL: 'https://github.com/Ntchinda-Giscard/wazalink.git'
-    
+    repoURL: "https://github.com/Ntchinda-Giscard/wazalink.git"
+
     # Target branch or revision (e.g., HEAD, main, master, or a specific tag)
     targetRevision: HEAD
-    
+
     # Path inside the Git repository where the Kubernetes manifests are stored
     # - If you push the 'k8s' folder to the root of your repository, use: 'k8s'
     # - If 'k8s' is nested inside another folder, update this path accordingly.
-    path: k8s
+    path: wazalink
 
   # Sync policy defines how changes in Git are applied to the Kubernetes cluster
   syncPolicy:
     automated:
-      prune: true      # Automatically delete resources that are removed from Git
-      selfHeal: true   # Automatically recreate resources if they drift or are modified manually in the cluster
+      prune: true # Automatically delete resources that are removed from Git
+      selfHeal: true # Automatically recreate resources if they drift or are modified manually in the cluster
     syncOptions:
-      - CreateNamespace=true  # Automatically create the destination namespace if it doesn't exist
+      - CreateNamespace=true # Automatically create the destination namespace if it doesn't exist
