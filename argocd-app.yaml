@@ -19,12 +19,12 @@ spec:
     repoURL: https://github.com/Ntchinda-Giscard/k8s.git
 
     # Target branch or revision (e.g., HEAD, main, master, or a specific tag)
-    targetRevision: k8s
+    targetRevision: master
 
     # Path inside the Git repository where the Kubernetes manifests are stored
     # - If you push the 'k8s' folder to the root of your repository, use: 'k8s'
     # - If 'k8s' is nested inside another folder, update this path accordingly.
-    path: wazalink
+    path: .
 
   # Sync policy defines how changes in Git are applied to the Kubernetes cluster
   syncPolicy:
