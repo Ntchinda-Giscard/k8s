@@ -21,7 +21,7 @@ spec:
       containers:
         - name: wazalink
           # Replace with your actual Docker registry image tag (e.g. docker.io/myusername/wazalink:1.0.0)
-          image: docker.io/giscardntchinda/wazalink:0.0.7
+          image: docker.io/giscardntchinda/wazalink:0.0.71
           imagePullPolicy: IfNotPresent
 
           # Container port exposed by FastAPI Uvicorn server
