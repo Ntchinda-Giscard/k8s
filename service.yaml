@@ -8,11 +8,11 @@ metadata:
 spec:
   selector:
     app: wazalink
-  # Expose as a ClusterIP by default (standard internal load balancer)
-  # Change to LoadBalancer or NodePort if direct external access is required
-  type: ClusterIP
+  # Expose as a NodePort so it's accessible outside the cluster
+  type: NodePort
   ports:
     - name: http
-      port: 80          # Port exposed by the Service in the cluster
-      targetPort: 7636  # Port that the pod's container listens on
+      port: 80
+      targetPort: 7636
+      nodePort: 30080
       protocol: TCP
