@@ -7,8 +7,8 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Ntchinda-Giscard/k8s.git
-    targetRevision: HEAD # You can change this to 'main' or a specific branch/tag
-    path: k8s # Now pointing to the specific folder
+    targetRevision: main
+    path: k8s
   destination:
     server: https://kubernetes.default.svc
     namespace: default # Replace with the namespace where you want your apps deployed
