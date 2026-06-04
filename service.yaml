@@ -14,5 +14,5 @@ spec:
   ports:
     - name: http
       port: 80          # Port exposed by the Service in the cluster
-      targetPort: 8080  # Port that the pod's container listens on
+      targetPort: 7636  # Port that the pod's container listens on
       protocol: TCP
