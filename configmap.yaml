@@ -12,7 +12,7 @@ data:
   X3_WS_LANG: "FRA"
 
   # Sage HRM SQL Server Database Configuration
-  HRM_DB_DRIVER: "ODBC Driver 18 for SQL Server"
+  HRM_DB_DRIVER: "ODBC Driver 17 for SQL Server"
   HRM_DB_SERVER: "192.168.99.22,1435"
   HRM_DB_DATABASE: "x3ppleprod"
   HRM_DB_TRUST_CERTIFICATE: "yes"
