@@ -12,7 +12,7 @@ spec:
   type: NodePort
   ports:
     - name: http
-      port: 80
+      port: 7636
       targetPort: 7636
       nodePort: 30080
       protocol: TCP
