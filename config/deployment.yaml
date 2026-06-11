@@ -18,10 +18,12 @@ spec:
       labels:
         app: wazalink
     spec:
+      securityContext:
+        fsGroup: 999
       containers:
         - name: wazalink
           # Replace with your actual Docker registry image tag (e.g. docker.io/myusername/wazalink:1.0.0)
-          image: docker.io/giscardntchinda/wazalink:0.0.83
+          image: docker.io/giscardntchinda/wazalink:0.0.84
           imagePullPolicy: IfNotPresent
 
           # Container port exposed by FastAPI Uvicorn server
@@ -38,10 +40,10 @@ spec:
                 name: wazalink-secret
 
           # Mount the persistent SQLite storage directory
-          # The app evaluates Path.home() / "wazalink_data", which resolves to /root/wazalink_data inside the container
+          # The app evaluates Path.home() / "wazalink_data", which resolves to /app/wazalink_data inside the container (appuser home is /app)
           volumeMounts:
             - name: wazalink-sqlite-volume
-              mountPath: /root/wazalink_data
+              mountPath: /app/wazalink_data
 
           # Health Probes pointing to FastAPI health endpoint ("/")
           livenessProbe:
