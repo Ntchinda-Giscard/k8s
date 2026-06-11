@@ -6,7 +6,6 @@ metadata:
   labels:
     app: wazalink
 data:
-  SENTRY_DSN: "https://f331e443af167a15d29686db1238a11d@o4511144775188480.ingest.de.sentry.io/4511270211682384"
   # OpenSSL configuration for legacy SQL Server TLS compatibility
   OPENSSL_CONF: "/etc/ssl/openssl.cnf"
   # Sage Syracuse Web Service Endpoint
