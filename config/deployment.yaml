@@ -20,6 +20,13 @@ spec:
     spec:
       securityContext:
         fsGroup: 999
+      initContainers:
+        - name: fix-volume-permissions
+          image: busybox:latest
+          command: ["sh", "-c", "chown -R 999:999 /data"]
+          volumeMounts:
+            - name: wazalink-sqlite-volume
+              mountPath: /data
       containers:
         - name: wazalink
           # Replace with your actual Docker registry image tag (e.g. docker.io/myusername/wazalink:1.0.0)
