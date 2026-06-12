@@ -6,6 +6,8 @@ metadata:
   labels:
     app: wazalink
 data:
+  # OpenSSL configuration for legacy SQL Server TLS compatibility
+  OPENSSL_CONF: "/etc/ssl/openssl.cnf"
   # Sage Syracuse Web Service Endpoint
   X3_WS_URL: "http://192.168.99.13:8124/soap-generic/syracuse/collaboration/syracuse/CAdxWebServiceXmlCC"
   X3_WS_POOL: "ZOPALM"

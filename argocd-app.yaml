@@ -7,12 +7,14 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Ntchinda-Giscard/k8s.git
-    targetRevision: main
-    path: k8s
+    targetRevision: HEAD
+    path: config
   destination:
     server: https://kubernetes.default.svc
     namespace: default # Replace with the namespace where you want your apps deployed
   syncPolicy:
+    syncOptions:
+      - CreateNamespace=true # Automatically create the target namespace if it doesn't exist
     automated:
-      prune: true
-      selfHeal: true
+      prune: true # Automatically delete resources that are no longer defined in Git
+      selfHeal: true # Automatically revert changes made to live resources that differ from Git
