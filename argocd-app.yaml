@@ -16,5 +16,5 @@ spec:
     syncOptions:
       - CreateNamespace=true # Automatically create the target namespace if it doesn't exist
     automated:
-      prune: true # Automatically delete resources that are no longer defined in Git
+      prune: false # Automatically delete resources that are no longer defined in Git
       selfHeal: false # Automatically revert changes made to live resources that differ from Git
