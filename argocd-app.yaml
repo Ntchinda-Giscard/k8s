@@ -18,4 +18,3 @@ spec:
     automated:
       prune: true # Automatically delete resources that are no longer defined in Git
       selfHeal: false # Automatically revert changes made to live resources that differ from Git
-
