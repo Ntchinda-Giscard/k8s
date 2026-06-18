@@ -71,7 +71,6 @@ spec:
             successThreshold: 1
             failureThreshold: 3
 
-          # Allocate resource guarantees and limits for container execution
           resources:
             requests:
               cpu: "100m"
