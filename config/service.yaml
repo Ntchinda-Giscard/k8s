@@ -1,20 +1,19 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: wazalink-service
+  name: wazalink-service-nodeport
   namespace: default
   labels:
     app: wazalink
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "192.168.100.2"
 spec:
   selector:
     app: wazalink
-  # Expose as a NodePort so it's accessible outside the cluster
-  type: NodePort
-  externalIPs:
-    - 192.168.100.2
+  type: LoadBalancer
+  externalTrafficPolicy: Local
   ports:
     - name: http
-      port: 7636
-      targetPort: 7636
-      nodePort: 30080
+      port: 30080 # External port
+      targetPort: 7636 # Container port
       protocol: TCP
