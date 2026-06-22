@@ -10,6 +10,8 @@ spec:
     app: wazalink
   # Expose as a NodePort so it's accessible outside the cluster
   type: NodePort
+  externalIPs:
+    - 192.168.100.2
   ports:
     - name: http
       port: 7636
