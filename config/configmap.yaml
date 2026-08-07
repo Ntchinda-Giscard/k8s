@@ -18,8 +18,10 @@ data:
   HRM_DB_SERVER: "192.168.99.22,1435"
   HRM_DB_DATABASE: "x3ppleprod"
   HRM_DB_TRUST_CERTIFICATE: "yes"
+  HRM_DB_SCHEMA: "OPAX3PTEST"
 
   # Sage X3 SQL Server Database Configuration
+  X3_DB_SCHEMA: "OPALM"
   X3_DB_DRIVER: "ODBC Driver 18 for SQL Server"
   X3_DB_SERVER: "192.168.99.13,1434"
   X3_DB_DATABASE: "sage"
