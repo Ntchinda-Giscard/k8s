@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Ntchinda-Giscard/k8s.git
-    targetRevision: HEAD
+    targetRevision: main
     path: config
   destination:
     server: https://kubernetes.default.svc
