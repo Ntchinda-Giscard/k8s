@@ -14,7 +14,7 @@ spec:
     namespace: default # Replace with the namespace where you want your apps deployed
   syncPolicy:
     syncOptions:
-      - CreateNamespace=true # Automatically create the target namespace if it doesn't exist
+      - CreateNamespace=false # Automatically create the target namespace if it doesn't exist
     automated:
       prune: false # Automatically delete resources that are no longer defined in Git
       selfHeal: false # Automatically revert changes made to live resources that differ from Git
