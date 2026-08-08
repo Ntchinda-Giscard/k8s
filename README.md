@@ -2,7 +2,7 @@
 
 This directory contains the production-grade Kubernetes manifest files and deployment procedures for the **Wazalink** integration project.
 
----
+## SIE2608SON001
 
 ## 📂 Manifests Breakdown
 
@@ -23,9 +23,10 @@ To build the Docker image supporting Microsoft SQL Server ODBC drivers, run the 
 docker build -t <your-registry>/wazalink:latest .
 ```
 
-*Note: The Dockerfile uses a Debian-slim base image and automatically registers Microsoft package signatures to install `msodbcsql17` and `msodbcsql18` packages. This ensures Python `pyodbc` works perfectly on Linux containers.*
+_Note: The Dockerfile uses a Debian-slim base image and automatically registers Microsoft package signatures to install `msodbcsql17` and `msodbcsql18` packages. This ensures Python `pyodbc` works perfectly on Linux containers._
 
 Push the image to your container registry:
+
 ```bash
 docker push <your-registry>/wazalink:latest
 ```
@@ -40,6 +41,7 @@ docker push <your-registry>/wazalink:latest
 
 2. **Apply all Manifests to the Cluster**:
    You can apply all configuration resources collectively by targeting this directory:
+
    ```bash
    kubectl apply -f k8s/
    ```
@@ -53,14 +55,16 @@ docker push <your-registry>/wazalink:latest
 
 ## 🔍 Step 3: Verifying the Deployment
 
-The deployment includes auto-configured `readinessProbe` and `livenessProbe` health checks. 
+The deployment includes auto-configured `readinessProbe` and `livenessProbe` health checks.
 
 To test connectivity internally, run a port-forward command to route traffic from your local workstation:
+
 ```bash
 kubectl port-forward svc/wazalink-service 8080:80
 ```
 
 Now, visit `http://localhost:8080` in your web browser. You should receive:
+
 ```json
 {
   "Health": "The endpoint is up and running."
@@ -74,6 +78,7 @@ Now, visit `http://localhost:8080` in your web browser. You should receive:
 > [!WARNING]
 > Because SQLite relies on local file locks, running multiple replicas of the container sharing the same Persistent Volume will cause locking errors.
 > If you plan to scale the Wazalink pod to `2` or more replicas for high availability:
+>
 > 1. You should migrate the internal SQLite database state (`session.py`) to a centralized client-server engine like **PostgreSQL** or **MS SQL Server**.
 > 2. Once done, you can delete the `pvc.yaml` manifest, remove the `volumeMounts` configuration from `deployment.yaml`, and safely adjust `replicas` to any desired count.
 
@@ -81,7 +86,7 @@ Now, visit `http://localhost:8080` in your web browser. You should receive:
 
 ## 🔄 Step 4: GitOps Continuous Delivery with Argo CD
 
-Argo CD allows you to continuously deploy your application directly from your Git repository. 
+Argo CD allows you to continuously deploy your application directly from your Git repository.
 
 To set up GitOps for Wazalink:
 
@@ -93,10 +98,10 @@ To set up GitOps for Wazalink:
 
 3. **Deploy the Application Resource to Argo CD**:
    Apply the application manifest directly to the namespace where Argo CD is running (usually `argocd`):
+
    ```bash
    kubectl apply -f k8s/argocd-app.yaml
    ```
 
 4. **Verify Synced Status**:
    Once applied, Argo CD will automatically pull your repository, detect all Kubernetes manifests inside the `k8s/` folder, deploy them into the target namespace, and maintain automated synchronization and self-healing.
-
