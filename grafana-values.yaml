@@ -1,0 +1,34 @@
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        uid: loki
+        type: loki
+        url: http://cluster.local
+        isDefault: false
+        jsonData:
+          maxLines: 1000
+
+      - name: Mimir
+        uid: prom
+        type: prometheus
+        url: http://cluster.local
+        isDefault: true
+        jsonData:
+          httpMethod: POST
+
+      - name: Tempo
+        uid: tempo
+        type: tempo
+        url: http://cluster.local
+        isDefault: false
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+          lokiSearch:
+            datasourceUid: loki
+          tracesToMetrics:
+            datasourceUid: prom
+          serviceMap:
+            datasourceUid: prom
