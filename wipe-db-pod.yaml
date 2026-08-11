@@ -1,0 +1,40 @@
+# Throwaway pod that mounts the WazaLink PVC and wipes the SQLite database.
+# Requires wazalink-deployment scaled to 0 first (the PVC is ReadWriteOnce).
+#
+# NOTE: deliberately kept OUTSIDE k8s/config/ — Argo CD syncs that directory
+# (argocd-app.yaml: path: config), so a maintenance pod placed there would be
+# deployed to the cluster on every sync.
+#
+#   kubectl -n default apply -f wipe-db-pod.yaml
+#   kubectl -n default logs wazalink-db-wipe
+#   kubectl -n default delete pod wazalink-db-wipe
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wazalink-db-wipe
+  namespace: default
+  labels:
+    app: wazalink-maintenance
+spec:
+  restartPolicy: Never
+  containers:
+    - name: wipe
+      image: busybox:latest
+      command:
+        - sh
+        - -c
+        - |
+          echo "=== contents before ==="
+          ls -la /data
+          echo "=== removing database files ==="
+          rm -f /data/wazalink.db /data/wazalink.db-wal /data/wazalink.db-shm
+          echo "=== contents after ==="
+          ls -la /data
+          echo "=== done ==="
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: wazalink-sqlite-pvc
