@@ -1,0 +1,85 @@
+# Loki — single-binary mode, sized for a one-node k3s alongside WazaLink.
+#
+#   helm repo add grafana https://grafana.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install loki grafana/loki \
+#     -n lgtm --create-namespace -f loki-values.yaml
+#
+# Single-binary, NOT the distributed topology from lgtm-distributed: on a
+# one-node k3s the distributed Loki/Mimir components cannot satisfy their
+# cross-node pod anti-affinity and sit Pending forever.
+#
+# NOTE: kept outside k8s/config/ — Argo CD syncs that path and Helm values are
+# not valid manifests.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  limits_config:
+    retention_period: 720h # 30 days
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 10Gi
+    # Uses k3s' built-in local-path provisioner. Do NOT point this at
+    # storageClassName "manual" — that class is hand-provisioned for
+    # wazalink-sqlite-pv and has no spare volumes.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+
+# Scalable-mode components must be zeroed out in SingleBinary mode.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+# The memcached caches default to requesting several Gi of RAM each — far more
+# than this node can spare, and pointless at this log volume.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+
+gateway:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"

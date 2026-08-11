@@ -1,3 +1,15 @@
+# Grafana — datasources for the LGTM stack in the `lgtm` namespace.
+#
+#   helm upgrade --install grafana grafana/grafana -n lgtm -f grafana-values.yaml
+#
+# Grafana lives in `lgtm`, so short service names would resolve, but FQDNs are
+# used here so the file still works if Grafana is ever moved.
+#
+# Mimir is intentionally absent: mimir-distributed cannot schedule on a
+# single-node k3s (zone-replicated ingesters/store-gateways carry pod
+# anti-affinity across nodes) and WazaLink exposes no metrics endpoint. Use
+# kube-prometheus-stack when you want metrics.
+
 datasources:
   datasources.yaml:
     apiVersion: 1
@@ -5,30 +17,40 @@ datasources:
       - name: Loki
         uid: loki
         type: loki
-        url: http://cluster.local
-        isDefault: false
+        url: http://loki-gateway.lgtm.svc.cluster.local:80
+        isDefault: true
         jsonData:
           maxLines: 1000
 
-      - name: Mimir
-        uid: prom
-        type: prometheus
-        url: http://cluster.local
-        isDefault: true
-        jsonData:
-          httpMethod: POST
-
+      # tempo service exposes OTLP on 4317/4318 and the query API on 3200.
+      # Will stay empty until the app is instrumented with OpenTelemetry —
+      # tracing currently goes to Sentry (src/main.py:15-23).
       - name: Tempo
         uid: tempo
         type: tempo
-        url: http://cluster.local
+        url: http://tempo.lgtm.svc.cluster.local:3200
         isDefault: false
         jsonData:
           tracesToLogsV2:
             datasourceUid: loki
           lokiSearch:
             datasourceUid: loki
-          tracesToMetrics:
-            datasourceUid: prom
-          serviceMap:
-            datasourceUid: prom
+
+persistence:
+  enabled: true
+  size: 2Gi
+
+adminUser: admin
+# Read the generated password with:
+#   kubectl -n lgtm get secret grafana -o jsonpath="{.data.admin-password}" | base64 -d
+
+service:
+  type: ClusterIP
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
