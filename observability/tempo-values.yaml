@@ -1,0 +1,50 @@
+# Tempo — single-binary trace backend for Alloy's OTLP exporter.
+#
+#   helm upgrade --install tempo grafana/tempo -n lgtm -f tempo-values.yaml
+#
+# SKIP THIS FILE if Tempo is already running in `lgtm` — grafana-values.yaml
+# already carries a Tempo datasource, so it may well be installed. Check with
+#   kubectl -n lgtm get svc tempo
+#
+# The `grafana/tempo` chart, not `tempo-distributed`: same single-node
+# reasoning as Loki and Mimir.
+#
+# ⚠️ PORT: verify the query API port before trusting the Grafana datasource.
+# Tempo's own default is 3200, but this chart configures the server on 3100.
+# Run the command above and make grafana-values.yaml match what you see —
+# a mismatch shows up as "Tempo: Bad Gateway" in Explore, nothing more obvious.
+
+tempo:
+  retention: 168h # 7 days — traces are far bulkier per unit of insight than logs
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Alloy is the only client; it exports OTLP/gRPC to :4317.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+service:
+  type: ClusterIP

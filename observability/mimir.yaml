@@ -1,0 +1,195 @@
+# Grafana Mimir — monolithic mode, the metrics backend for Alloy's remote_write.
+#
+#   kubectl apply -f mimir.yaml
+#
+# Plain manifests rather than a Helm chart on purpose: `mimir-distributed` is
+# the only official chart and it cannot schedule on a one-node k3s (its
+# zone-replicated ingesters and store-gateways carry cross-node pod
+# anti-affinity). Mimir's own binary supports `-target=all`, which runs every
+# component in one process — the same trade-off already made for Loki
+# (SingleBinary + filesystem storage in loki-values.yaml).
+#
+# Filesystem storage means no object store to run, and no HA. That is the right
+# call at this scale; revisit if this ever leaves the single node.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lgtm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mimir-config
+  namespace: lgtm
+  labels:
+    app: mimir
+data:
+  mimir.yaml: |
+    target: all
+    multitenancy_enabled: false
+
+    # Mimir phones home with anonymous usage statistics by default. This
+    # cluster sits on a private 192.168.x network with no egress guarantee.
+    usage_stats:
+      enabled: false
+
+    server:
+      http_listen_port: 9009
+      grpc_listen_port: 9095
+      log_level: warn
+
+    # Every ring is single-member. memberlist with an empty join list forms a
+    # one-node cluster, which is what `-target=all` expects.
+    memberlist:
+      join_members: []
+
+    distributor:
+      ring:
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+
+    ingester:
+      ring:
+        instance_addr: 127.0.0.1
+        replication_factor: 1
+        kvstore:
+          store: memberlist
+
+    store_gateway:
+      sharding_ring:
+        replication_factor: 1
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+
+    compactor:
+      data_dir: /data/mimir/compactor
+      sharding_ring:
+        kvstore:
+          store: memberlist
+
+    blocks_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/mimir/blocks
+      bucket_store:
+        sync_dir: /data/mimir/tsdb-sync
+      tsdb:
+        dir: /data/mimir/tsdb
+
+    ruler_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/mimir/ruler
+
+    # Defaults to ./metrics-activity.log, which is not writable here.
+    activity_tracker:
+      filepath: /data/mimir/metrics-activity.log
+
+    limits:
+      # Matches Loki's 30-day retention so logs and metrics age out together.
+      compactor_blocks_retention_period: 30d
+      # Alloy sends kubelet + cAdvisor + kube-state-metrics for one node.
+      # A few thousand series in practice; these ceilings are generous.
+      max_global_series_per_user: 300000
+      ingestion_rate: 50000
+      ingestion_burst_size: 200000
+      out_of_order_time_window: 5m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimir
+  namespace: lgtm
+  labels:
+    app: mimir
+spec:
+  type: ClusterIP
+  selector:
+    app: mimir
+  ports:
+    - name: http
+      port: 9009
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 9095
+      targetPort: grpc
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mimir
+  namespace: lgtm
+  labels:
+    app: mimir
+spec:
+  replicas: 1
+  serviceName: mimir
+  selector:
+    matchLabels:
+      app: mimir
+  template:
+    metadata:
+      labels:
+        app: mimir
+      annotations:
+        # Picked up by Alloy's annotation-based scrape job, so Mimir's own
+        # health is visible in Mimir.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9009"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: mimir
+          image: grafana/mimir:2.13.0
+          args:
+            - -config.file=/etc/mimir/mimir.yaml
+          ports:
+            - name: http
+              containerPort: 9009
+            - name: grpc
+              containerPort: 9095
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              # Monolithic Mimir holds the TSDB head in memory. 2Gi is the
+              # floor for comfort — if this node is tight, that is the number
+              # to check before blaming anything else.
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mimir
+            - name: storage
+              mountPath: /data/mimir
+      volumes:
+        - name: config
+          configMap:
+            name: mimir-config
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # k3s local-path provisioner, same as Loki. Do NOT set "manual" —
+        # that class is hand-provisioned for wazalink-sqlite-pv.
+        resources:
+          requests:
+            storage: 10Gi

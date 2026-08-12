@@ -5,10 +5,13 @@
 # Grafana lives in `lgtm`, so short service names would resolve, but FQDNs are
 # used here so the file still works if Grafana is ever moved.
 #
-# Mimir is intentionally absent: mimir-distributed cannot schedule on a
-# single-node k3s (zone-replicated ingesters/store-gateways carry pod
-# anti-affinity across nodes) and WazaLink exposes no metrics endpoint. Use
-# kube-prometheus-stack when you want metrics.
+# Mimir now runs in monolithic mode from observability/mimir.yaml. The old note
+# here — that Mimir was intentionally absent — applied to the `mimir-distributed`
+# chart, whose zone-replicated ingesters and store-gateways cannot satisfy their
+# cross-node anti-affinity on one node. Running the binary with `-target=all`
+# sidesteps that entirely, the same way Loki runs SingleBinary.
+#
+# Alloy is the only writer to all three backends; see observability/alloy-values.yaml.
 
 datasources:
   datasources.yaml:
@@ -22,9 +25,27 @@ datasources:
         jsonData:
           maxLines: 1000
 
-      # tempo service exposes OTLP on 4317/4318 and the query API on 3200.
-      # Will stay empty until the app is instrumented with OpenTelemetry —
-      # tracing currently goes to Sentry (src/main.py:15-23).
+      # Metrics arrive via Alloy → prometheus.remote_write → Mimir. Mimir serves
+      # a Prometheus-compatible API under /prometheus, so the datasource type is
+      # prometheus, not a Mimir-specific one.
+      - name: Mimir
+        uid: mimir
+        type: prometheus
+        url: http://mimir.lgtm.svc.cluster.local:9009/prometheus
+        isDefault: false
+        jsonData:
+          timeInterval: 60s # matches Alloy's scrape_interval
+          exemplarTraceIdDestinations:
+            - name: trace_id
+              datasourceUid: tempo
+
+      # ⚠️ Verify the port: `kubectl -n lgtm get svc tempo`. Tempo's own default
+      # is 3200, but the grafana/tempo chart configures the server on 3100. A
+      # mismatch surfaces only as "Bad Gateway" in Explore.
+      #
+      # Stays empty until the app is instrumented with OpenTelemetry — tracing
+      # currently goes to Sentry (src/main.py:15-23). Alloy's OTLP receiver is
+      # already listening on alloy.monitoring.svc.cluster.local:4318.
       - name: Tempo
         uid: tempo
         type: tempo
@@ -33,6 +54,8 @@ datasources:
         jsonData:
           tracesToLogsV2:
             datasourceUid: loki
+          tracesToMetrics:
+            datasourceUid: mimir
           lokiSearch:
             datasourceUid: loki
 

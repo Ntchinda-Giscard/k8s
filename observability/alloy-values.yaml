@@ -1,12 +1,21 @@
-# Grafana Alloy — collects container stdout from every pod and ships it to Loki.
-# (Replaces Promtail, which is end-of-life.)
+# Grafana Alloy — the single collector for all three signals.
 #
 #   helm upgrade --install alloy grafana/alloy \
 #     -n monitoring --create-namespace -f alloy-values.yaml
 #
-# Log lines are forwarded raw and parsed at query time with `| json` in LogQL —
-# WazaLink emits JSON to stdout, other pods do not, so parsing here would fail
-# on everything else in the cluster.
+#   logs    → Loki   (loki-gateway.lgtm:80)
+#   metrics → Mimir  (mimir.lgtm:9009)
+#   traces  → Tempo  (tempo.lgtm:4317)
+#
+# Alloy replaces Promtail (end-of-life), node-exporter, and a standalone
+# Prometheus server all at once — one DaemonSet, one config, three backends.
+#
+# SINGLE-NODE ASSUMPTION: this runs as a DaemonSet, so every instance evaluates
+# every scrape job. On one node that is exactly right. Adding a second node
+# would make the cluster-wide jobs (kube-state-metrics, the annotation job,
+# kubelet-via-API-proxy) scrape N times over. The fix at that point is to split
+# them into a second Alloy running as a Deployment with replicas=1 and leave
+# only the log tailing here. Marked ⚠️ MULTI-NODE below.
 
 controller:
   type: daemonset
@@ -14,21 +23,56 @@ controller:
 alloy:
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
-    limits:
-      cpu: "500m"
+      cpu: "100m"
       memory: "256Mi"
+    limits:
+      # Raised from 256Mi: metric scraping plus the OTLP receiver need more
+      # headroom than log tailing alone did.
+      cpu: "1"
+      memory: "512Mi"
+
+  # OTLP ingest, so the app can send traces to
+  # alloy.monitoring.svc.cluster.local:4318
+  extraPorts:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
 
   configMap:
     content: |-
+      // =====================================================================
+      // SHARED DISCOVERY
+      // =====================================================================
       discovery.kubernetes "pods" {
         role = "pod"
       }
 
-      discovery.relabel "pods" {
+      discovery.kubernetes "nodes" {
+        role = "node"
+      }
+
+      // =====================================================================
+      // LOGS
+      //
+      // Split into two pipelines. WazaLink emits one JSON object per line and
+      // needs its Python tracebacks stitched back together; nothing else in
+      // the cluster shares that format, so a multiline stage applied globally
+      // would corrupt other pods' output.
+      // =====================================================================
+      discovery.relabel "wazalink_logs" {
         targets = discovery.kubernetes.pods.targets
 
+        rule {
+          source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_label_app"]
+          separator     = "/"
+          regex         = "default/wazalink"
+          action        = "keep"
+        }
         rule {
           source_labels = ["__meta_kubernetes_namespace"]
           target_label  = "namespace"
@@ -47,13 +91,298 @@ alloy:
         }
       }
 
-      loki.source.kubernetes "pods" {
-        targets    = discovery.relabel.pods.output
+      discovery.relabel "other_logs" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_label_app"]
+          separator     = "/"
+          regex         = "default/wazalink"
+          action        = "drop"
+        }
+        // Control-plane chatter would fill a 10Gi filesystem-backed Loki for
+        // no operational benefit. Drop it at the source, not at query time.
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          regex         = "kube-system|kube-public|kube-node-lease"
+          action        = "drop"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.kubernetes "wazalink" {
+        targets    = discovery.relabel.wazalink_logs.output
+        forward_to = [loki.process.wazalink.receiver]
+      }
+
+      loki.source.kubernetes "other" {
+        targets    = discovery.relabel.other_logs.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.process "wazalink" {
+        // A traceback arrives as one line per frame, each a separate Loki
+        // entry, which makes a stack trace unreadable in Explore. Anything
+        // that does not start a new record — no JSON object, no uvicorn level
+        // prefix — is a continuation of the line above it.
+        stage.multiline {
+          firstline     = "^(\\{\"ts\":|INFO:|DEBUG:|WARNING:|ERROR:|CRITICAL:)"
+          max_lines     = 128
+          max_wait_time = "3s"
+        }
+
+        // Parse once here so `level` becomes a real label for Grafana's log
+        // level colouring. The line itself is forwarded unchanged, so
+        // query-time `| json` still works exactly as before.
+        stage.json {
+          expressions = { level = "level" }
+        }
+
+        stage.labels {
+          values = { level = "level" }
+        }
+
         forward_to = [loki.write.default.receiver]
       }
 
       loki.write "default" {
         endpoint {
           url = "http://loki-gateway.lgtm.svc.cluster.local:80/loki/api/v1/push"
+        }
+      }
+
+      // =====================================================================
+      // METRICS
+      // =====================================================================
+
+      // --- kubelet: node and pod resource usage, plus PVC fill ---------------
+      // kubelet_volume_stats_* is the only signal that warns before the
+      // SQLite PVC or Loki's 10Gi volume runs out.
+      //
+      // Scraped through the API server proxy rather than node:10250 directly,
+      // so no node certificate trust is needed. ⚠️ MULTI-NODE
+      discovery.relabel "kubelet" {
+        targets = discovery.kubernetes.nodes.targets
+
+        rule {
+          target_label = "__address__"
+          replacement  = "kubernetes.default.svc:443"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+          replacement   = "/api/v1/nodes/${1}/proxy/metrics"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      prometheus.scrape "kubelet" {
+        targets           = discovery.relabel.kubelet.output
+        forward_to        = [prometheus.remote_write.mimir.receiver]
+        job_name          = "kubelet"
+        scheme            = "https"
+        scrape_interval   = "60s"
+        bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+        tls_config {
+          ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        }
+      }
+
+      // --- cAdvisor: per-container CPU and memory ---------------------------
+      // container_memory_working_set_bytes against the 512Mi limit in
+      // deployment.yaml is how you find out the app is heading for an OOMKill.
+      discovery.relabel "cadvisor" {
+        targets = discovery.kubernetes.nodes.targets
+
+        rule {
+          target_label = "__address__"
+          replacement  = "kubernetes.default.svc:443"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+          replacement   = "/api/v1/nodes/${1}/proxy/metrics/cadvisor"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      prometheus.scrape "cadvisor" {
+        targets           = discovery.relabel.cadvisor.output
+        forward_to        = [prometheus.remote_write.mimir.receiver]
+        job_name          = "cadvisor"
+        scheme            = "https"
+        scrape_interval   = "60s"
+        bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+        tls_config {
+          ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        }
+      }
+
+      // --- kube-state-metrics: object state ---------------------------------
+      // The source of kube_pod_container_status_restarts_total — the metric
+      // that turns "the pod is crash-looping" into an alert. Install with:
+      //   helm upgrade --install kube-state-metrics \
+      //     prometheus-community/kube-state-metrics -n monitoring
+      // ⚠️ MULTI-NODE
+      prometheus.scrape "kube_state_metrics" {
+        targets = [
+          {
+            __address__ = "kube-state-metrics.monitoring.svc.cluster.local:8080",
+            job         = "kube-state-metrics",
+          },
+        ]
+        forward_to      = [prometheus.remote_write.mimir.receiver]
+        scrape_interval = "60s"
+      }
+
+      // --- annotation-driven application scraping ---------------------------
+      // Nothing matches this yet: WazaLink exposes no /metrics endpoint. Once
+      // prometheus-fastapi-instrumentator is added, annotate the pod template
+      // with prometheus.io/scrape="true" and prometheus.io/port="7636" and it
+      // is collected with no change here. ⚠️ MULTI-NODE
+      discovery.relabel "annotated_pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+          regex         = "true"
+          action        = "keep"
+        }
+        // Skip pods that are not running — scraping a Pending pod just logs errors.
+        rule {
+          source_labels = ["__meta_kubernetes_pod_phase"]
+          regex         = "Running"
+          action        = "keep"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+          regex         = "(.+)"
+          target_label  = "__metrics_path__"
+        }
+        rule {
+          source_labels = ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
+          regex         = "([^:]+)(?::\\d+)?;(\\d+)"
+          replacement   = "$1:$2"
+          target_label  = "__address__"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      prometheus.scrape "annotated_pods" {
+        targets         = discovery.relabel.annotated_pods.output
+        forward_to      = [prometheus.remote_write.mimir.receiver]
+        job_name        = "kubernetes-pods"
+        scrape_interval = "30s"
+      }
+
+      // --- Alloy's own health ----------------------------------------------
+      // A collector that silently stops shipping is the worst failure mode in
+      // any observability stack. These are the metrics that catch it.
+      prometheus.exporter.self "alloy" {}
+
+      prometheus.scrape "alloy" {
+        targets         = prometheus.exporter.self.alloy.targets
+        forward_to      = [prometheus.remote_write.mimir.receiver]
+        job_name        = "alloy"
+        scrape_interval = "60s"
+      }
+
+      prometheus.remote_write "mimir" {
+        endpoint {
+          url = "http://mimir.lgtm.svc.cluster.local:9009/api/v1/push"
+        }
+
+        external_labels = {
+          cluster = "wazalink-k3s",
+        }
+      }
+
+      // =====================================================================
+      // TRACES
+      //
+      // Receives OTLP and forwards to Tempo. Nothing sends here yet — the app
+      // still reports to Sentry (src/main.py:15-23) and has no OpenTelemetry
+      // dependency. Wiring it now means instrumenting the app is a pure
+      // application change with no cluster work.
+      // =====================================================================
+      otelcol.receiver.otlp "default" {
+        grpc {
+          endpoint = "0.0.0.0:4317"
+        }
+        http {
+          endpoint = "0.0.0.0:4318"
+        }
+
+        output {
+          traces = [otelcol.processor.k8sattributes.default.input]
+        }
+      }
+
+      // Stamps spans with namespace/pod/container so a trace in Tempo can jump
+      // to the matching Loki stream — this is what makes the tracesToLogsV2
+      // link in grafana-values.yaml actually resolve.
+      otelcol.processor.k8sattributes "default" {
+        extract {
+          metadata = [
+            "k8s.namespace.name",
+            "k8s.pod.name",
+            "k8s.container.name",
+          ]
+        }
+
+        output {
+          traces = [otelcol.processor.batch.default.input]
+        }
+      }
+
+      otelcol.processor.batch "default" {
+        output {
+          traces = [otelcol.exporter.otlp.tempo.input]
+        }
+      }
+
+      otelcol.exporter.otlp "tempo" {
+        client {
+          endpoint = "tempo.lgtm.svc.cluster.local:4317"
+
+          tls {
+            insecure = true
+          }
         }
       }
