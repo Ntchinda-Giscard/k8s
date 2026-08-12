@@ -29,7 +29,7 @@ spec:
               mountPath: /data
       containers:
         - name: wazalink
-          image: docker.io/giscardntchinda/wazalink:0.0.127
+          image: docker.io/giscardntchinda/wazalink:0.0.128
           imagePullPolicy: IfNotPresent
           # Container port exposed by FastAPI Uvicorn server
           ports:
