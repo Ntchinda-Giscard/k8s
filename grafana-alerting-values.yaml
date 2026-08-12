@@ -285,6 +285,12 @@ alerting:
           # rule 4's `| json` stage silently drops them. This rule is the only
           # thing watching that path — see the note in the analysis about
           # fixing it properly with a uvicorn log_config.
+          #
+          # The `| json | __error__="JSONParserErr"` stage is load-bearing: a
+          # plain `|= "Traceback"` filter also matches every logger.exception()
+          # line, because JsonFormatter embeds the formatted traceback in the
+          # `exception` field of an otherwise valid JSON line. Keeping only
+          # lines that FAIL to parse as JSON leaves exactly the uvicorn path.
           # -------------------------------------------------------------
           - uid: wazalink-unhandled-traceback
             title: WazaLink unhandled exception (non-JSON log path)
@@ -310,7 +316,7 @@ alerting:
                   refId: A
                   datasource: { type: loki, uid: loki }
                   queryType: instant
-                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "Traceback (most recent call last)" [10m]))'
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "Traceback (most recent call last)" | json | __error__="JSONParserErr" [10m]))'
               - refId: B
                 datasourceUid: __expr__
                 model:
