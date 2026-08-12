@@ -1,0 +1,178 @@
+{{- if .Values.mimir.enabled }}
+{{- /*
+Mimir in monolithic mode: one process running every component via -target=all.
+
+Resource names are hardcoded to `mimir` rather than release-prefixed, so the
+service DNS stays stable no matter what the release is called — the Alloy and
+Grafana values reference it by that name and values.yaml cannot be templated.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mimir-config
+  labels:
+    app: mimir
+    {{- include "lgtm-stack.labels" . | nindent 4 }}
+data:
+  mimir.yaml: |
+    target: all
+    multitenancy_enabled: false
+
+    # No egress guarantee on a private 192.168.x network — don't try to phone home.
+    usage_stats:
+      enabled: false
+
+    server:
+      http_listen_port: 9009
+      grpc_listen_port: 9095
+      log_level: {{ .Values.mimir.logLevel }}
+
+    # Every ring has exactly one member. An empty join list forms a single-node
+    # memberlist cluster, which is what -target=all expects.
+    memberlist:
+      join_members: []
+
+    distributor:
+      ring:
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+
+    ingester:
+      ring:
+        instance_addr: 127.0.0.1
+        replication_factor: 1
+        kvstore:
+          store: memberlist
+
+    store_gateway:
+      sharding_ring:
+        replication_factor: 1
+        instance_addr: 127.0.0.1
+        kvstore:
+          store: memberlist
+
+    compactor:
+      data_dir: /data/mimir/compactor
+      sharding_ring:
+        kvstore:
+          store: memberlist
+
+    blocks_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/mimir/blocks
+      bucket_store:
+        sync_dir: /data/mimir/tsdb-sync
+      tsdb:
+        dir: /data/mimir/tsdb
+
+    ruler_storage:
+      backend: filesystem
+      filesystem:
+        dir: /data/mimir/ruler
+
+    # Defaults to ./metrics-activity.log, which is not writable here.
+    activity_tracker:
+      filepath: /data/mimir/metrics-activity.log
+
+    limits:
+      compactor_blocks_retention_period: {{ .Values.mimir.retention }}
+      max_global_series_per_user: {{ .Values.mimir.limits.maxGlobalSeriesPerUser }}
+      ingestion_rate: {{ .Values.mimir.limits.ingestionRate }}
+      ingestion_burst_size: {{ .Values.mimir.limits.ingestionBurstSize }}
+      out_of_order_time_window: 5m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimir
+  labels:
+    app: mimir
+    {{- include "lgtm-stack.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: mimir
+  ports:
+    - name: http
+      port: 9009
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 9095
+      targetPort: grpc
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mimir
+  labels:
+    app: mimir
+    {{- include "lgtm-stack.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: mimir
+  selector:
+    matchLabels:
+      app: mimir
+  template:
+    metadata:
+      labels:
+        app: mimir
+      annotations:
+        # Rolls the pod when the config changes — a ConfigMap edit alone would
+        # otherwise leave the old config running until something else restarts it.
+        checksum/config: {{ include (print $.Template.BasePath "/mimir.yaml") . | sha256sum }}
+        # Collected by Alloy's annotation scrape job, so Mimir monitors itself.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9009"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        fsGroup: 10001
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: mimir
+          image: {{ .Values.mimir.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config.file=/etc/mimir/mimir.yaml
+          ports:
+            - name: http
+              containerPort: 9009
+            - name: grpc
+              containerPort: 9095
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.mimir.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mimir
+            - name: storage
+              mountPath: /data/mimir
+      volumes:
+        - name: config
+          configMap:
+            name: mimir-config
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.mimir.persistence.storageClassName }}
+        storageClassName: {{ .Values.mimir.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.mimir.persistence.size }}
+{{- end }}

@@ -1,0 +1,43 @@
+apiVersion: v2
+name: lgtm-stack
+description: >-
+  Loki, Grafana, Tempo and Mimir plus Alloy as the single collector, sized for
+  one node. Everything lands in one namespace and one Helm release.
+type: application
+version: 0.1.0
+appVersion: "1.0"
+
+# Mimir is NOT a dependency: `mimir-distributed` is the only official chart and
+# it cannot run here — its zone-replicated ingesters and store-gateways carry
+# cross-node anti-affinity, which is exactly why the previous install left
+# ingester-zone-{a,b,c} and store-gateway-zone-{a,b,c} Pending forever. Mimir's
+# binary supports `-target=all`, so it ships as plain templates in templates/mimir.yaml.
+#
+# Version ranges rather than pins, so `helm dependency update` resolves whatever
+# is current. If one fails to resolve, list what exists with e.g.
+#   helm search repo grafana/loki --versions
+dependencies:
+  - name: loki
+    version: "^6.0.0"
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.enabled
+
+  - name: tempo
+    version: "^1.0.0"
+    repository: https://grafana.github.io/helm-charts
+    condition: tempo.enabled
+
+  - name: grafana
+    version: "^8.0.0"
+    repository: https://grafana.github.io/helm-charts
+    condition: grafana.enabled
+
+  - name: alloy
+    version: "^1.0.0"
+    repository: https://grafana.github.io/helm-charts
+    condition: alloy.enabled
+
+  - name: kube-state-metrics
+    version: "^5.0.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kube-state-metrics.enabled

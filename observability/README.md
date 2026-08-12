@@ -1,72 +1,77 @@
-# Observability — LGTM with Alloy as the single collector
+# Observability — one Helm release
 
-Alloy runs as a DaemonSet in `monitoring` and is the **only** thing that writes
-to the backends. The backends all live in `lgtm`.
+`lgtm-stack/` is an umbrella chart: Loki, Tempo, Grafana, kube-state-metrics and
+Alloy as dependencies, plus Mimir in monolithic mode as local templates. One
+command deploys the lot into one namespace.
 
 ```
-                    ┌──────────────┐
-   pod stdout ─────▶│              │───▶ Loki   (logs)
-   kubelet/cAdvisor▶│    Alloy     │───▶ Mimir  (metrics)
-   OTLP :4317/4318▶│  (DaemonSet)  │───▶ Tempo  (traces)
-                    └──────────────┘           ▲
-                                               │
-                                    Grafana ───┘ queries all three
+                     ┌──────────────┐
+    pod stdout ─────▶│              │───▶ Loki   (logs)
+kubelet/cAdvisor ───▶│    Alloy     │───▶ Mimir  (metrics)
+   OTLP 4317/4318 ──▶│  (DaemonSet) │───▶ Tempo  (traces)
+                     └──────────────┘           ▲
+                                                │
+                                     Grafana ───┘ queries all three
 ```
 
-One collector instead of Promtail + node-exporter + a Prometheus server. Every
-backend runs in its single-node form — Loki `SingleBinary`, Mimir `-target=all`,
-Tempo single-binary — because the distributed charts carry cross-node pod
-anti-affinity that cannot be satisfied here.
+Alloy replaces Promtail (end-of-life), node-exporter and a standalone Prometheus
+server at once. Every backend runs in its single-process form — Loki
+`SingleBinary`, Mimir `-target=all`, Tempo single-binary — because the
+distributed topologies carry cross-node pod anti-affinity that one node cannot
+satisfy.
 
-## Install order
+## Prerequisite: a default StorageClass
 
-Backends first: Alloy crash-loops on a missing remote_write endpoint.
+Check first. Without one, every PVC sits `Pending` and nothing starts:
 
-```bash
+```
+kubectl get storageclass
+```
+
+If the list is empty, install Rancher's local-path provisioner and mark it default:
+
+```
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+
+kubectl patch storageclass local-path -p "{\"metadata\":{\"annotations\":{\"storageclass.kubernetes.io/is-default-class\":\"true\"}}}"
+```
+
+Alternatively, set `storageClassName` explicitly in each block of `values.yaml`.
+
+## Install
+
+```
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 
-# 1. Logs
-helm upgrade --install loki grafana/loki \
-  -n lgtm --create-namespace -f loki-values.yaml
+cd k8s/observability
+helm dependency update ./lgtm-stack
 
-# 2. Metrics
-kubectl apply -f mimir.yaml
-
-# 3. Traces — SKIP if `kubectl -n lgtm get svc tempo` already returns something
-helm upgrade --install tempo grafana/tempo -n lgtm -f tempo-values.yaml
-
-# 4. Object-state metrics (pod restarts, deployment status)
-helm upgrade --install kube-state-metrics \
-  prometheus-community/kube-state-metrics -n monitoring --create-namespace
-
-# 5. The collector
-helm upgrade --install alloy grafana/alloy \
-  -n monitoring --create-namespace -f alloy-values.yaml
-
-# 6. Grafana, with datasources and alert rules
-helm upgrade --install grafana grafana/grafana -n lgtm \
-  -f ../grafana-values.yaml -f ../grafana-alerting-values.yaml
+helm upgrade --install lgtm ./lgtm-stack -n lgtm --create-namespace
 ```
 
-Wait for Mimir before Alloy:
+`helm dependency update` downloads the subcharts into `lgtm-stack/charts/` — run
+it again whenever `Chart.yaml` changes. If a version range fails to resolve, see
+what exists with `helm search repo grafana/loki --versions` and adjust.
 
-```bash
-kubectl -n lgtm rollout status statefulset/mimir --timeout=300s
+Watch it come up:
+
+```
+kubectl -n lgtm get pods -w
 ```
 
 ## Verify
 
-Alloy's own UI is the fastest way to see whether components are healthy —
-anything red here explains everything downstream:
+Alloy's own UI is the fastest diagnosis — anything red here explains everything
+downstream:
 
-```bash
-kubectl -n monitoring port-forward daemonset/alloy 12345:12345
+```
+kubectl -n lgtm port-forward daemonset/alloy 12345:12345
 # http://localhost:12345/graph — every component should be green
 ```
 
-Then confirm each signal is landing, in Grafana → Explore:
+Then confirm each signal lands, in Grafana → Explore:
 
 | Signal | Datasource | Query | Expect |
 |---|---|---|---|
@@ -76,38 +81,54 @@ Then confirm each signal is landing, in Grafana → Explore:
 | Metrics | Mimir | `kubelet_volume_stats_available_bytes` | Free space per PVC |
 | Traces | Tempo | search | **Empty — expected**, see below |
 
-## Viewing Grafana
+## Reaching Grafana
 
-Grafana is ClusterIP, so from the server:
+MetalLB is installed on this cluster, so Grafana is a `LoadBalancer` and gets a
+routable IP — no port-forward:
 
-```bash
-kubectl -n lgtm port-forward svc/grafana 3000:80
+```
+kubectl -n lgtm get svc grafana
 kubectl -n lgtm get secret grafana -o jsonpath="{.data.admin-password}" | base64 -d
 ```
 
-Reaching it from a workstation needs `--address 0.0.0.0` plus a firewall rule,
-or an Ingress.
+If the `EXTERNAL-IP` stays `<pending>`, the MetalLB pool in
+`config/metallb-config.yaml` is exhausted or doesn't cover this network. Switch
+`grafana.service.type` back to `ClusterIP` and port-forward instead.
+
+## Uninstall
+
+```
+helm -n lgtm uninstall lgtm
+kubectl delete namespace lgtm
+```
+
+The namespace delete is what removes the PVCs — `helm uninstall` leaves
+StatefulSet volumes behind on purpose.
 
 ## Known gaps
+
+**Alerting is not in this chart yet.** `../grafana-alerting-values.yaml` has six
+Loki-based rules, but its top-level `alerting:` and `grafana.ini:` keys must be
+nested one level under `grafana:` to work as umbrella values. Until that's done,
+the rules are not deployed.
 
 **Traces will be empty.** Alloy's OTLP receiver is listening, but nothing sends
 to it: the app uses Sentry (`src/main.py:15-23`) and has no OpenTelemetry
 dependency. To close it, add `opentelemetry-instrumentation-fastapi` and point
-`OTEL_EXPORTER_OTLP_ENDPOINT` at
-`http://alloy.monitoring.svc.cluster.local:4318`. No cluster change needed.
+`OTEL_EXPORTER_OTLP_ENDPOINT` at `http://alloy.lgtm.svc.cluster.local:4318`.
 
-**No application metrics.** The `kubernetes-pods` scrape job is annotation-
-driven and currently matches nothing. Add
-`prometheus-fastapi-instrumentator`, then annotate the pod template with
-`prometheus.io/scrape: "true"` and `prometheus.io/port: "7636"`. A counter
-around `Pipeline.run` is what turns "an error was logged" into "the pipeline
-succeeded 0 of its last 10 runs" — a far better alert than any log grep.
+**No application metrics.** The `kubernetes-pods` scrape job is annotation-driven
+and currently matches nothing. Add `prometheus-fastapi-instrumentator`, then
+annotate the pod template with `prometheus.io/scrape: "true"` and
+`prometheus.io/port: "7636"`. A counter around `Pipeline.run` is what turns "an
+error was logged" into "the pipeline succeeded 0 of its last 10 runs".
 
-**Alerting is log-based only.** The six rules in `../grafana-alerting-values.yaml`
-predate Mimir and all query Loki. Once metrics flow, the pod-restart and
-memory-pressure rules that logs cannot express are worth adding.
+**Single node is assumed.** Alloy is a DaemonSet, so the cluster-wide scrape jobs
+would duplicate across nodes. See the `⚠️ SINGLE NODE` note in `values.yaml`.
 
-**Single node is assumed.** Alloy is a DaemonSet, so cluster-wide scrape jobs
-(kube-state-metrics, kubelet, the annotation job) would duplicate across nodes.
-The jobs are marked `⚠️ MULTI-NODE` in `alloy-values.yaml`; splitting them into
-a second Alloy running as a Deployment is the fix if a node is ever added.
+## Superseded files
+
+`loki-values.yaml`, `tempo-values.yaml`, `alloy-values.yaml` and `mimir.yaml` in
+this directory are the standalone per-component versions. Everything in them now
+lives in `lgtm-stack/values.yaml`. They are kept only for reference and can be
+deleted.

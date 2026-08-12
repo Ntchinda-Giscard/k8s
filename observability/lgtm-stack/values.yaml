@@ -1,0 +1,629 @@
+# LGTM + Alloy, one release.
+#
+#   helm dependency update ./lgtm-stack
+#   helm upgrade --install lgtm ./lgtm-stack -n lgtm --create-namespace
+#
+# Everything lives in a single namespace, so components address each other by
+# short service name (`mimir`, `loki-gateway`, `tempo`). Each subchart pins a
+# fullnameOverride to keep those names stable — without it Helm would prefix
+# them with the release name and every URL below would break.
+#
+# STORAGE: leave storageClassName empty to use the cluster default. This cluster
+# had NO default StorageClass, which is why every PVC sat Pending. Confirm with
+#   kubectl get storageclass
+# and either mark one default or set the name explicitly in each block below.
+#
+# SINGLE NODE: every backend runs in its single-process form. The distributed
+# topologies (loki distributed, mimir-distributed, tempo-distributed) cannot
+# schedule here — their replicas carry cross-node pod anti-affinity.
+
+# ===========================================================================
+# MIMIR — metrics. Templates in this chart, not a dependency (see Chart.yaml).
+# ===========================================================================
+mimir:
+  enabled: true
+  # Check for a newer tag before installing: https://hub.docker.com/r/grafana/mimir/tags
+  image: grafana/mimir:2.13.0
+  logLevel: warn
+  retention: 30d # matches Loki, so metrics and logs age out together
+
+  persistence:
+    size: 10Gi
+    storageClassName: "" # "" = cluster default
+
+  limits:
+    # One node's worth of kubelet + cAdvisor + kube-state-metrics is a few
+    # thousand series in practice. These ceilings are deliberately generous.
+    maxGlobalSeriesPerUser: 300000
+    ingestionRate: 50000
+    ingestionBurstSize: 200000
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      # Monolithic Mimir holds the TSDB head in memory. If the node is tight,
+      # this is the first number to look at.
+      cpu: "1"
+      memory: "2Gi"
+
+# ===========================================================================
+# LOKI — logs
+# ===========================================================================
+loki:
+  enabled: true
+  fullnameOverride: loki
+
+  deploymentMode: SingleBinary
+
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+    limits_config:
+      retention_period: 720h # 30 days
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+    compactor:
+      retention_enabled: true
+      delete_request_store: filesystem
+
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: "" # "" = cluster default
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+
+  # Scalable-mode components must be zeroed out in SingleBinary mode.
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+
+  # These caches default to several Gi of RAM each — far more than this node
+  # can spare, and pointless at this log volume.
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+
+  gateway:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: "10m"
+        memory: "32Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+# ===========================================================================
+# TEMPO — traces
+# ===========================================================================
+tempo:
+  enabled: true
+  fullnameOverride: tempo
+
+  tempo:
+    retention: 168h # 7 days — traces are far bulkier per unit of insight than logs
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+
+    # Alloy is the only client; it exports OTLP/gRPC to :4317.
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: "" # "" = cluster default
+
+# ===========================================================================
+# GRAFANA — the only thing meant to be reached by a human
+# ===========================================================================
+grafana:
+  enabled: true
+  fullnameOverride: grafana
+
+  adminUser: admin
+  # Read the generated password with:
+  #   kubectl -n lgtm get secret grafana -o jsonpath="{.data.admin-password}" | base64 -d
+
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClassName: "" # "" = cluster default
+
+  # MetalLB is installed on this cluster (metallb-system namespace), so a
+  # LoadBalancer gets a routable IP from the pool in config/metallb-config.yaml
+  # — no port-forward, no Ingress. Switch to ClusterIP if you would rather
+  # tunnel. Find the assigned address with:
+  #   kubectl -n lgtm get svc grafana
+  service:
+    type: LoadBalancer
+    port: 80
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Loki
+          uid: loki
+          type: loki
+          url: http://loki-gateway
+          isDefault: true
+          jsonData:
+            maxLines: 1000
+
+        # Mimir serves a Prometheus-compatible API under /prometheus, so the
+        # datasource type is prometheus.
+        - name: Mimir
+          uid: mimir
+          type: prometheus
+          url: http://mimir:9009/prometheus
+          isDefault: false
+          jsonData:
+            timeInterval: 60s # matches Alloy's scrape_interval
+            exemplarTraceIdDestinations:
+              - name: trace_id
+                datasourceUid: tempo
+
+        # Port 3200 confirmed against the running service.
+        # Stays empty until the app is instrumented with OpenTelemetry —
+        # tracing currently goes to Sentry (src/main.py:15-23).
+        - name: Tempo
+          uid: tempo
+          type: tempo
+          url: http://tempo:3200
+          isDefault: false
+          jsonData:
+            tracesToLogsV2:
+              datasourceUid: loki
+            tracesToMetrics:
+              datasourceUid: mimir
+            lokiSearch:
+              datasourceUid: loki
+
+# ===========================================================================
+# KUBE-STATE-METRICS — object state (pod restarts, deployment status)
+# ===========================================================================
+kube-state-metrics:
+  enabled: true
+  fullnameOverride: kube-state-metrics
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+# ===========================================================================
+# ALLOY — the single collector: logs, metrics and traces
+# ===========================================================================
+alloy:
+  enabled: true
+  fullnameOverride: alloy
+
+  controller:
+    type: daemonset
+
+  alloy:
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "1"
+        memory: "512Mi"
+
+    # OTLP ingest. From another namespace the app addresses this as
+    # alloy.lgtm.svc.cluster.local:4318
+    extraPorts:
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
+
+    configMap:
+      content: |-
+        // =================================================================
+        // SHARED DISCOVERY
+        // =================================================================
+        discovery.kubernetes "pods" {
+          role = "pod"
+        }
+
+        discovery.kubernetes "nodes" {
+          role = "node"
+        }
+
+        // =================================================================
+        // LOGS
+        //
+        // Two pipelines. WazaLink emits one JSON object per line and needs its
+        // Python tracebacks stitched back together; nothing else in the cluster
+        // shares that format, so a global multiline stage would corrupt other
+        // pods' output.
+        // =================================================================
+        discovery.relabel "wazalink_logs" {
+          targets = discovery.kubernetes.pods.targets
+
+          rule {
+            source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_label_app"]
+            separator     = "/"
+            regex         = "default/wazalink"
+            action        = "keep"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            target_label  = "namespace"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_name"]
+            target_label  = "pod"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_name"]
+            target_label  = "container"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_label_app"]
+            target_label  = "app"
+          }
+        }
+
+        discovery.relabel "other_logs" {
+          targets = discovery.kubernetes.pods.targets
+
+          rule {
+            source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_label_app"]
+            separator     = "/"
+            regex         = "default/wazalink"
+            action        = "drop"
+          }
+          // Control-plane chatter would fill a 10Gi filesystem-backed Loki for
+          // no operational benefit. Drop it at the source, not at query time.
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            regex         = "kube-system|kube-public|kube-node-lease"
+            action        = "drop"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            target_label  = "namespace"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_name"]
+            target_label  = "pod"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_container_name"]
+            target_label  = "container"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_label_app"]
+            target_label  = "app"
+          }
+        }
+
+        loki.source.kubernetes "wazalink" {
+          targets    = discovery.relabel.wazalink_logs.output
+          forward_to = [loki.process.wazalink.receiver]
+        }
+
+        loki.source.kubernetes "other" {
+          targets    = discovery.relabel.other_logs.output
+          forward_to = [loki.write.default.receiver]
+        }
+
+        loki.process "wazalink" {
+          // A traceback arrives as one entry per frame, which makes a stack
+          // trace unreadable in Explore. Anything that does not start a new
+          // record — no JSON object, no uvicorn level prefix — is a
+          // continuation of the line above it.
+          stage.multiline {
+            firstline     = "^(\\{\"ts\":|INFO:|DEBUG:|WARNING:|ERROR:|CRITICAL:)"
+            max_lines     = 128
+            max_wait_time = "3s"
+          }
+
+          // Parse once here so `level` becomes a real label for Grafana's log
+          // level colouring. The line is forwarded unchanged, so query-time
+          // `| json` still works exactly as before.
+          stage.json {
+            expressions = { level = "level" }
+          }
+
+          stage.labels {
+            values = { level = "level" }
+          }
+
+          forward_to = [loki.write.default.receiver]
+        }
+
+        loki.write "default" {
+          endpoint {
+            url = "http://loki-gateway/loki/api/v1/push"
+          }
+        }
+
+        // =================================================================
+        // METRICS
+        //
+        // ⚠️ SINGLE NODE: Alloy runs as a DaemonSet, so every instance
+        // evaluates every scrape job. On one node that is correct. Adding a
+        // second node would make the cluster-wide jobs below scrape N times
+        // over; the fix then is a second Alloy as a Deployment with
+        // replicas=1, leaving only log tailing in the DaemonSet.
+        // =================================================================
+
+        // --- kubelet: node and pod resource usage, plus PVC fill ------------
+        // kubelet_volume_stats_* is the only signal that warns before a PVC
+        // fills up. Scraped through the API server proxy, so no node
+        // certificate trust is needed.
+        discovery.relabel "kubelet" {
+          targets = discovery.kubernetes.nodes.targets
+
+          rule {
+            target_label = "__address__"
+            replacement  = "kubernetes.default.svc:443"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_node_name"]
+            regex         = "(.+)"
+            target_label  = "__metrics_path__"
+            replacement   = "/api/v1/nodes/${1}/proxy/metrics"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_node_name"]
+            target_label  = "node"
+          }
+        }
+
+        prometheus.scrape "kubelet" {
+          targets           = discovery.relabel.kubelet.output
+          forward_to        = [prometheus.remote_write.mimir.receiver]
+          job_name          = "kubelet"
+          scheme            = "https"
+          scrape_interval   = "60s"
+          bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+          tls_config {
+            ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          }
+        }
+
+        // --- cAdvisor: per-container CPU and memory ------------------------
+        // container_memory_working_set_bytes against the 512Mi limit in
+        // deployment.yaml is how you see an OOMKill coming.
+        discovery.relabel "cadvisor" {
+          targets = discovery.kubernetes.nodes.targets
+
+          rule {
+            target_label = "__address__"
+            replacement  = "kubernetes.default.svc:443"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_node_name"]
+            regex         = "(.+)"
+            target_label  = "__metrics_path__"
+            replacement   = "/api/v1/nodes/${1}/proxy/metrics/cadvisor"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_node_name"]
+            target_label  = "node"
+          }
+        }
+
+        prometheus.scrape "cadvisor" {
+          targets           = discovery.relabel.cadvisor.output
+          forward_to        = [prometheus.remote_write.mimir.receiver]
+          job_name          = "cadvisor"
+          scheme            = "https"
+          scrape_interval   = "60s"
+          bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+          tls_config {
+            ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          }
+        }
+
+        // --- kube-state-metrics: object state -------------------------------
+        // Source of kube_pod_container_status_restarts_total — the metric that
+        // turns "the pod is crash-looping" into something alertable.
+        prometheus.scrape "kube_state_metrics" {
+          targets = [
+            {
+              __address__ = "kube-state-metrics:8080",
+              job         = "kube-state-metrics",
+            },
+          ]
+          forward_to      = [prometheus.remote_write.mimir.receiver]
+          scrape_interval = "60s"
+        }
+
+        // --- annotation-driven application scraping -------------------------
+        // Matches nothing yet: WazaLink exposes no /metrics endpoint. Once
+        // prometheus-fastapi-instrumentator is added, annotate the pod template
+        // with prometheus.io/scrape="true" and prometheus.io/port="7636" and it
+        // is collected with no change here.
+        discovery.relabel "annotated_pods" {
+          targets = discovery.kubernetes.pods.targets
+
+          rule {
+            source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+            regex         = "true"
+            action        = "keep"
+          }
+          // Scraping a Pending pod just logs errors.
+          rule {
+            source_labels = ["__meta_kubernetes_pod_phase"]
+            regex         = "Running"
+            action        = "keep"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+            regex         = "(.+)"
+            target_label  = "__metrics_path__"
+          }
+          rule {
+            source_labels = ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
+            regex         = "([^:]+)(?::\\d+)?;(\\d+)"
+            replacement   = "$1:$2"
+            target_label  = "__address__"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_namespace"]
+            target_label  = "namespace"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_name"]
+            target_label  = "pod"
+          }
+          rule {
+            source_labels = ["__meta_kubernetes_pod_label_app"]
+            target_label  = "app"
+          }
+        }
+
+        prometheus.scrape "annotated_pods" {
+          targets         = discovery.relabel.annotated_pods.output
+          forward_to      = [prometheus.remote_write.mimir.receiver]
+          job_name        = "kubernetes-pods"
+          scrape_interval = "30s"
+        }
+
+        // --- Alloy's own health ---------------------------------------------
+        // A collector that silently stops shipping is the worst failure mode in
+        // any observability stack. These are the metrics that catch it.
+        prometheus.exporter.self "alloy" {}
+
+        prometheus.scrape "alloy" {
+          targets         = prometheus.exporter.self.alloy.targets
+          forward_to      = [prometheus.remote_write.mimir.receiver]
+          job_name        = "alloy"
+          scrape_interval = "60s"
+        }
+
+        prometheus.remote_write "mimir" {
+          endpoint {
+            url = "http://mimir:9009/api/v1/push"
+          }
+
+          external_labels = {
+            cluster = "wazalink-aksedge",
+          }
+        }
+
+        // =================================================================
+        // TRACES
+        //
+        // Nothing sends here yet — the app reports to Sentry and has no
+        // OpenTelemetry dependency. Wiring it now makes instrumenting the app
+        // a pure application change with no cluster work.
+        // =================================================================
+        otelcol.receiver.otlp "default" {
+          grpc {
+            endpoint = "0.0.0.0:4317"
+          }
+          http {
+            endpoint = "0.0.0.0:4318"
+          }
+
+          output {
+            traces = [otelcol.processor.k8sattributes.default.input]
+          }
+        }
+
+        // Stamps spans with namespace/pod/container so a trace in Tempo can
+        // jump to the matching Loki stream — this is what makes the
+        // tracesToLogsV2 link in the Grafana datasource resolve.
+        otelcol.processor.k8sattributes "default" {
+          extract {
+            metadata = [
+              "k8s.namespace.name",
+              "k8s.pod.name",
+              "k8s.container.name",
+            ]
+          }
+
+          output {
+            traces = [otelcol.processor.batch.default.input]
+          }
+        }
+
+        otelcol.processor.batch "default" {
+          output {
+            traces = [otelcol.exporter.otlp.tempo.input]
+          }
+        }
+
+        otelcol.exporter.otlp "tempo" {
+          client {
+            endpoint = "tempo:4317"
+
+            tls {
+              insecure = true
+            }
+          }
+        }
