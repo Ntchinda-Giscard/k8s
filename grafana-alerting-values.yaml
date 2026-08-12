@@ -1,0 +1,379 @@
+# Grafana Unified Alerting — provisioned alert rules over Loki.
+#
+#   helm upgrade --install grafana grafana/grafana -n lgtm \
+#     -f grafana-values.yaml -f grafana-alerting-values.yaml
+#
+# Every rule here queries Loki, because Loki is the only datasource that
+# currently holds data: there is no metrics backend (see grafana-values.yaml —
+# Mimir is deliberately absent and WazaLink exposes no /metrics endpoint).
+# That is a real constraint, not an oversight: the pipeline swallows step
+# exceptions (src/pipelines/base.py:34-35) and keeps going, so the pod stays
+# Ready and the liveness probe stays green while the integration is dead. Logs
+# are the only place that failure is visible today.
+#
+# Provisioned rules and policies are READ-ONLY in the Grafana UI. Edit them
+# here and re-run helm upgrade.
+
+# ---------------------------------------------------------------------------
+# SMTP — required for the email contact point below. Fill in before applying,
+# or switch the contact point to the Slack/webhook variant.
+# ---------------------------------------------------------------------------
+grafana.ini:
+  smtp:
+    enabled: false # ← set true once host/user/password are filled in
+    host: "smtp.example.com:587"
+    user: ""
+    password: ""
+    from_address: "grafana@example.com"
+    from_name: "Grafana — WazaLink"
+    skip_verify: false
+
+alerting:
+  contactpoints.yaml:
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: wazalink-oncall
+        receivers:
+          - uid: wazalink-oncall-email
+            type: email
+            settings:
+              addresses: giscardntchinda@gmail.com
+              singleEmail: true
+
+          # Slack alternative — no SMTP server needed. Drop the email receiver
+          # above and uncomment this once you have an incoming-webhook URL.
+          # - uid: wazalink-oncall-slack
+          #   type: slack
+          #   settings:
+          #     url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+          #     title: '{{ template "slack.default.title" . }}'
+
+  policies.yaml:
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: wazalink-oncall
+        group_by: [alertname, pod]
+        group_wait: 30s
+        group_interval: 5m
+        # Critical pages repeat hourly; everything else stays quiet for 12h so
+        # a permanently-degraded CAPI does not train you to ignore the inbox.
+        repeat_interval: 12h
+        routes:
+          - receiver: wazalink-oncall
+            object_matchers:
+              - [severity, =, critical]
+            group_wait: 10s
+            repeat_interval: 1h
+
+  rules.yaml:
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: wazalink-logs
+        folder: WazaLink
+        interval: 1m
+        rules:
+          # -------------------------------------------------------------
+          # 1. The pipeline stopped running at all.
+          #
+          # The scheduler fires every 60s (src/main_scheduler.py:27) and each
+          # step logs "=== Running: <step> ===" (src/pipelines/base.py:28).
+          # Ten minutes of silence means the APScheduler background thread
+          # died, the pod is wedged, or Alloy stopped shipping — none of which
+          # any HTTP probe can see. This is the single most valuable rule here.
+          # -------------------------------------------------------------
+          - uid: wazalink-pipeline-silent
+            title: WazaLink pipeline has stopped running
+            condition: C
+            for: 0m
+            noDataState: Alerting # no streams at all == the failure we are looking for
+            execErrState: Alerting
+            labels:
+              severity: critical
+              service: wazalink
+            annotations:
+              summary: No pipeline step has been logged for 10 minutes
+              description: >-
+                The scheduler runs every 60s but nothing matching "=== Running:"
+                reached Loki in the last 10m. Check the pod is up and that the
+                APScheduler thread is alive, then check Alloy in the monitoring
+                namespace.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 600, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "=== Running:" [10m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: lt, params: [1] }
+
+          # -------------------------------------------------------------
+          # 2. Blocs failing to reach the CAPI endpoint.
+          #
+          # src/services/planteur_block.py:309 — a RequestException here means
+          # data is NOT arriving downstream, but the zone is left pending and
+          # retried silently forever.
+          # -------------------------------------------------------------
+          - uid: wazalink-capi-send-failures
+            title: WazaLink cannot deliver blocs to CAPI
+            condition: C
+            for: 5m
+            noDataState: OK
+            execErrState: Alerting
+            labels:
+              severity: critical
+              service: wazalink
+            annotations:
+              summary: Bloc delivery to CAPI is failing
+              description: >-
+                "Error sending bloc ... to CAPI" appeared in the last 10m.
+                Zones stay pending and are retried every minute, so this will
+                not self-resolve if CAPI_URL (192.168.100.2) is unreachable.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 600, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "Error sending bloc" [10m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+
+          # -------------------------------------------------------------
+          # 3. Sage X3 / HRM database access failing.
+          #
+          # planteur_block.py:137,176,230,255 — every DB block ends in a broad
+          # `except` that logs and returns empty, so a dead SQL Server looks
+          # exactly like "no new data" from the outside.
+          # -------------------------------------------------------------
+          - uid: wazalink-sage-db-errors
+            title: WazaLink Sage database access is failing
+            condition: C
+            for: 5m
+            noDataState: OK
+            execErrState: Alerting
+            labels:
+              severity: critical
+              service: wazalink
+            annotations:
+              summary: Errors reading from or writing to the Sage databases
+              description: >-
+                Check HRM_DB_SERVER (192.168.99.22,1435) and X3_DB_SERVER
+                (192.168.99.13,1434) reachability and credentials. An empty
+                result set and a dead database are indistinguishable upstream.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 600, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "An error occurred while" [10m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+
+          # -------------------------------------------------------------
+          # 4. General application error rate, from the JSON `level` field.
+          #
+          # Catches everything the specific rules above do not. Only matches
+          # lines the app's JsonFormatter produced — see rule 5 for the rest.
+          # -------------------------------------------------------------
+          - uid: wazalink-error-log-rate
+            title: WazaLink error log rate is elevated
+            condition: C
+            for: 10m
+            noDataState: OK
+            execErrState: OK
+            labels:
+              severity: warning
+              service: wazalink
+            annotations:
+              summary: More than 10 ERROR/CRITICAL lines in 10 minutes
+              description: >-
+                Open the WazaLink logs dashboard and filter on
+                level=~"ERROR|CRITICAL" to see what is repeating.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 600, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} | json | level=~"ERROR|CRITICAL" [10m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: gt, params: [10] }
+
+          # -------------------------------------------------------------
+          # 5. Unhandled exceptions that bypass the JSON formatter.
+          #
+          # The container runs `uvicorn main:app` (Dockerfile CMD), so uvicorn
+          # installs its own handlers with propagate=False. Its startup lines
+          # and any unhandled request traceback are PLAIN TEXT, not JSON, and
+          # rule 4's `| json` stage silently drops them. This rule is the only
+          # thing watching that path — see the note in the analysis about
+          # fixing it properly with a uvicorn log_config.
+          # -------------------------------------------------------------
+          - uid: wazalink-unhandled-traceback
+            title: WazaLink unhandled exception (non-JSON log path)
+            condition: C
+            for: 0m
+            noDataState: OK
+            execErrState: OK
+            labels:
+              severity: warning
+              service: wazalink
+            annotations:
+              summary: A Python traceback was written outside the JSON logger
+              description: >-
+                Emitted by uvicorn rather than the app logger, so it does not
+                appear in any `| json` query. Multi-line tracebacks arrive as
+                separate Loki entries until a multiline stage is added to Alloy.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 600, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "Traceback (most recent call last)" [10m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+
+          # -------------------------------------------------------------
+          # 6. Zones repeatedly left half-delivered.
+          #
+          # planteur_block.py:317 — a partial send is retried, so one occurrence
+          # is normal. A sustained count means a specific bloc is poisoned and
+          # will retry forever.
+          # -------------------------------------------------------------
+          - uid: wazalink-zones-partially-sent
+            title: WazaLink zones stuck partially sent
+            condition: C
+            for: 30m
+            noDataState: OK
+            execErrState: OK
+            labels:
+              severity: warning
+              service: wazalink
+            annotations:
+              summary: Zones have been left pending for retry for 30 minutes
+              description: >-
+                Look for the zone code in the "partially sent" lines — the same
+                code repeating means that bloc never succeeds.
+            data:
+              - refId: A
+                queryType: instant
+                relativeTimeRange: { from: 1800, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  queryType: instant
+                  expr: 'sum(count_over_time({namespace="default", app="wazalink"} |= "partially sent" [30m]))'
+              - refId: B
+                datasourceUid: __expr__
+                model:
+                  refId: B
+                  type: reduce
+                  reducer: last
+                  expression: A
+                  datasource: { type: __expr__, uid: __expr__ }
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  type: threshold
+                  expression: B
+                  datasource: { type: __expr__, uid: __expr__ }
+                  conditions:
+                    - evaluator: { type: gt, params: [5] }
