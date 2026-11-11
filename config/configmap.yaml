@@ -29,3 +29,7 @@ data:
 
   # CAPI Client Endpoint
   CAPI_URL: "http://192.168.100.2"
+
+  # Address CAPI uses to reach WazaLink (Windows host IP + port forwarding),
+  # checked every minute by the Sentry heartbeat
+  HEALTHCHECK_URL: "http://192.168.100.2:30080/"
